@@ -1,22 +1,12 @@
 """
 Agent de veille économique Chine — CFO étranger APAC
 =====================================================
-Sources surveillées :
-  - NBS    (National Bureau of Statistics) — PIB, IPI, PMI, CPI, PPI
-  - PBOC   (Banque centrale) — politique monétaire, crédit, M2
-  - MOFCOM (Commerce extérieur) — exports, imports, balance commerciale
-  - World Bank China — indicateurs macro
-  - Caixin PMI — PMI indépendant manufacturier & services
-
+Sources : IMF, World Bank, OECD, Caixin, BBC Business, SCMP
 Fréquence : lundi à vendredi 8h Shanghai (00:00 UTC)
-Livraison  : rapport .txt dans GitHub Artifacts
-
-Variables d'environnement (GitHub Secrets) :
-  ANTHROPIC_API_KEY
 """
 
 import os, json, logging, hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -38,73 +28,48 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Sources RSS / flux publics
-# ---------------------------------------------------------------------------
-
 SOURCES = [
     {
-        "nom": "NBS China — Statistiques nationales",
-        "url": "http://www.stats.gov.cn/english/rss/p1.xml",
-        "tags": ["GDP", "CPI", "PPI", "PMI", "industrial", "retail", "employment"],
+        "nom": "IMF — Fonds monétaire international",
+        "url": "https://www.imf.org/en/News/rss?language=eng",
+        "tags": ["China", "Asia", "GDP", "growth", "inflation", "monetary", "fiscal"],
     },
     {
-        "nom": "PBOC — Politique monétaire",
-        "url": "http://www.pbc.gov.cn/en/3688110/index.rss",
-        "tags": ["monetary", "credit", "M2", "loan", "interest rate", "RRR", "liquidity"],
+        "nom": "World Bank — Banque mondiale",
+        "url": "https://blogs.worldbank.org/rss.xml",
+        "tags": ["China", "Asia", "economy", "growth", "trade", "development"],
     },
     {
-        "nom": "MOFCOM — Commerce extérieur",
-        "url": "http://english.mofcom.gov.cn/rss/article.xml",
-        "tags": ["export", "import", "trade", "surplus", "deficit", "foreign trade"],
+        "nom": "OECD — Organisation de coopération économique",
+        "url": "https://www.oecd.org/newsroom/news.rss",
+        "tags": ["China", "Asia", "GDP", "PMI", "inflation", "trade", "APAC"],
     },
     {
-        "nom": "Xinhua Finance — Actualités économiques",
-        "url": "http://www.xinhuanet.com/english/rss/economyAll.xml",
-        "tags": ["economy", "growth", "GDP", "stimulus", "fiscal", "consumption"],
+        "nom": "Caixin — Presse économique chinoise",
+        "url": "https://www.caixinglobal.com/rss/all.xml",
+        "tags": ["China", "economy", "PMI", "GDP", "trade", "yuan", "PBOC", "property"],
+    },
+    {
+        "nom": "BBC Business — Actualités mondiales",
+        "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
+        "tags": ["China", "Asia", "economy", "trade", "yuan", "growth", "inflation"],
     },
     {
         "nom": "South China Morning Post — Économie",
         "url": "https://www.scmp.com/rss/5/feed",
-        "tags": ["China economy", "growth", "PMI", "trade", "property", "consumption"],
-    },
-    {
-        "nom": "Reuters — Chine & APAC",
-        "url": "https://feeds.reuters.com/reuters/CNtopNews",
-        "tags": ["China", "economy", "GDP", "PBOC", "stimulus", "trade", "yuan"],
+        "tags": ["China", "economy", "GDP", "PMI", "trade", "property", "consumption"],
     },
 ]
 
-# Mots-clés économiques pertinents pour un CFO
 KEYWORDS_ECO = [
-    "GDP", "growth", "PMI", "CPI", "PPI", "inflation", "deflation",
-    "export", "import", "trade surplus", "trade deficit",
-    "consumption", "retail sales", "industrial output",
-    "stimulus", "fiscal policy", "monetary policy",
-    "interest rate", "RRR", "reserve ratio", "credit",
-    "property", "real estate", "unemployment", "jobs",
-    "yuan", "RMB", "exchange rate", "capital flow",
-    "foreign investment", "FDI", "supply chain",
-    "manufacturing", "services sector", "Caixin", "NBS",
+    "China", "GDP", "growth", "PMI", "CPI", "PPI", "inflation", "deflation",
+    "export", "import", "trade", "consumption", "retail", "industrial",
+    "stimulus", "fiscal", "monetary", "interest rate", "reserve",
+    "yuan", "RMB", "PBOC", "property", "real estate", "unemployment",
+    "Caixin", "NBS", "APAC", "Asia", "supply chain", "manufacturing",
+    "credit", "liquidity", "foreign investment", "FDI",
 ]
 
-# Indicateurs macro à surveiller — publiés mensuellement par NBS
-INDICATEURS_NBS = {
-    "GDP":              "Croissance du PIB",
-    "CPI":              "Inflation consommateurs",
-    "PPI":              "Inflation producteurs",
-    "PMI Manufacturing":"PMI Manufacturier NBS",
-    "PMI Services":     "PMI Services NBS",
-    "Industrial Output":"Production industrielle",
-    "Retail Sales":     "Ventes au détail",
-    "Fixed Investment": "Investissement fixe",
-    "Unemployment":     "Taux de chômage",
-}
-
-
-# ---------------------------------------------------------------------------
-# Gestion des articles déjà vus
-# ---------------------------------------------------------------------------
 
 def charger_vus():
     if SEEN_FILE.exists():
@@ -117,18 +82,20 @@ def sauvegarder_vus(vus):
         json.dump(list(vus), f)
 
 
-# ---------------------------------------------------------------------------
-# Récupération des flux RSS
-# ---------------------------------------------------------------------------
-
 def fetch_rss(source):
     articles = []
     try:
-        resp = requests.get(source["url"], timeout=15,
-                            headers={"User-Agent": "CFO-EcoAgent/1.0"})
+        resp = requests.get(
+            source["url"], timeout=15,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; CFO-EcoAgent/1.0)",
+                "Accept": "application/rss+xml, application/xml, text/xml",
+            }
+        )
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
-        items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
+        items = (root.findall(".//item") or
+                 root.findall(".//{http://www.w3.org/2005/Atom}entry"))
 
         for item in items[:20]:
             titre = (
@@ -173,25 +140,19 @@ def filtrer_pertinents(articles, vus):
     return nouveaux
 
 
-# ---------------------------------------------------------------------------
-# Analyse Claude
-# ---------------------------------------------------------------------------
-
 SYSTEM_PROMPT = """Tu es un économiste senior spécialisé en Chine et en zone APAC,
 conseiller d'un CFO de multinationale étrangère basé à Shanghai.
 
 Tu analyses les actualités et indicateurs économiques chinois et évalues leur impact
 concret sur les décisions financières d'un CFO :
-- Impact sur les revenus et la demande locale (consommation, secteur immobilier)
-- Impact sur les coûts (inflation PPI, matières premières, logistique)
+- Impact sur les revenus et la demande locale
+- Impact sur les coûts (inflation, matières premières, logistique)
 - Impact sur la politique de change et les flux financiers
 - Signaux de politique monétaire ou fiscale à anticiper
-- Comparaison avec les tendances APAC (Japon, Corée, ASEAN, Inde)
+- Comparaison avec les tendances APAC
 
-Ton analyse est :
-- En français, ton professionnel et synthétique
-- Structurée avec un niveau de signal : FORT / MODÉRÉ / FAIBLE
-- Orientée décision CFO : que surveiller, que réviser, qu'anticiper ?
+Ton analyse est en français, professionnelle, orientée décision CFO.
+Niveau de signal : FORT / MODÉRÉ / FAIBLE
 """
 
 def analyser_avec_claude(articles):
@@ -212,18 +173,18 @@ def analyser_avec_claude(articles):
         )
 
     prompt = (
-        f"Veille économique Chine — {date_str}\n"
-        f"Nombre d'articles à analyser : {len(articles)}\n\n"
-        f"{articles_txt}\n\n"
-        "Pour chaque signal économique important, fournis :\n"
+        "Veille économique Chine — " + date_str + "\n"
+        "Nombre d'articles : " + str(len(articles)) + "\n\n"
+        + articles_txt +
+        "\nPour chaque signal important :\n"
         "1. SIGNAL : FORT / MODÉRÉ / FAIBLE\n"
-        "2. INDICATEUR : quel indicateur macro est concerné ?\n"
-        "3. LECTURE : que nous dit ce chiffre sur l'économie chinoise ?\n"
-        "4. IMPACT CFO : conséquence concrète sur les revenus, coûts, change ou liquidité\n"
-        "5. À SURVEILLER : quel prochain indicateur ou événement confirmerait ou infirmerait ce signal ?\n\n"
+        "2. INDICATEUR : quel indicateur macro ?\n"
+        "3. LECTURE : que dit ce signal sur l'économie chinoise ?\n"
+        "4. IMPACT CFO : conséquence sur revenus, coûts, change ou liquidité\n"
+        "5. À SURVEILLER : quel prochain indicateur confirmerait ce signal ?\n\n"
         "Termine par :\n"
-        "- SYNTHÈSE MACRO (5 lignes) : état de l'économie chinoise cette semaine\n"
-        "- COMPARAISON APAC : comment la Chine se positionne-t-elle par rapport au reste de la région ?\n"
+        "- SYNTHÈSE MACRO (5 lignes) : état de l'économie cette semaine\n"
+        "- COMPARAISON APAC : comment la Chine se positionne vs la région ?\n"
         "- 3 POINTS D'ATTENTION pour le CFO cette semaine"
     )
 
@@ -237,52 +198,46 @@ def analyser_avec_claude(articles):
     return msg.content[0].text
 
 
-# ---------------------------------------------------------------------------
-# Génération du rapport
-# ---------------------------------------------------------------------------
-
 def generer_rapport(articles, analyse):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lignes = [
         "=" * 62,
-        f"  VEILLE ECONOMIQUE CHINE — {now}",
-        f"  Pour : CFO étranger / Couverture APAC",
+        "  VEILLE ECONOMIQUE CHINE — " + now,
+        "  Pour : CFO étranger / Couverture APAC",
         "=" * 62,
-        f"\n  {len(articles)} signal(s) économique(s) détecté(s)",
-        "\n  SOURCES SURVEILLÉES :",
+        "",
+        "  " + str(len(articles)) + " signal(s) économique(s) détecté(s)",
+        "",
+        "  SOURCES SURVEILLÉES :",
     ]
     for s in SOURCES:
-        lignes.append(f"    - {s['nom']}")
+        lignes.append("    - " + s["nom"])
 
     if articles:
-        lignes += ["\n" + "-" * 62, "  ARTICLES DU JOUR", "-" * 62]
+        lignes += ["", "-" * 62, "  ARTICLES DU JOUR", "-" * 62]
         for i, a in enumerate(articles, 1):
-            lignes.append(f"\n  [{i}] {a['source']}")
-            lignes.append(f"      {a['titre']}")
+            lignes.append("\n  [" + str(i) + "] " + a["source"])
+            lignes.append("      " + a["titre"])
             if a["lien"]:
-                lignes.append(f"      {a['lien']}")
+                lignes.append("      " + a["lien"])
 
     lignes += [
-        "\n" + "-" * 62,
+        "", "-" * 62,
         "  ANALYSE ÉCONOMIQUE & POINTS D'ATTENTION CFO",
         "-" * 62,
         analyse,
-        "\n" + "=" * 62,
+        "", "=" * 62,
     ]
     return "\n".join(lignes)
 
 def sauvegarder_rapport(rapport):
     dossier = Path("rapports")
     dossier.mkdir(exist_ok=True)
-    fichier = dossier / f"eco_chine_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
+    fichier = dossier / ("eco_chine_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
     with open(fichier, "w", encoding="utf-8") as f:
         f.write(rapport)
-    log.info(f"Rapport : {fichier}")
+    log.info("Rapport : " + str(fichier))
 
-
-# ---------------------------------------------------------------------------
-# Agent principal
-# ---------------------------------------------------------------------------
 
 def executer_agent():
     log.info("Démarrage agent veille économique Chine...")
@@ -292,11 +247,11 @@ def executer_agent():
 
         for source in SOURCES:
             articles = fetch_rss(source)
-            log.info(f"{source['nom']} : {len(articles)} articles récupérés")
+            log.info(source["nom"] + " : " + str(len(articles)) + " articles récupérés")
             tous_articles.extend(articles)
 
         pertinents = filtrer_pertinents(tous_articles, vus)
-        log.info(f"Signaux pertinents et nouveaux : {len(pertinents)}")
+        log.info("Signaux pertinents : " + str(len(pertinents)))
 
         analyse = analyser_avec_claude(pertinents)
         rapport = generer_rapport(pertinents, analyse)
@@ -311,9 +266,9 @@ def executer_agent():
         log.info("Terminé.")
 
     except anthropic.APIError as e:
-        log.error(f"Claude : {e}")
+        log.error("Claude : " + str(e))
     except Exception as e:
-        log.exception(f"Erreur : {e}")
+        log.exception("Erreur : " + str(e))
 
 
 if __name__ == "__main__":
