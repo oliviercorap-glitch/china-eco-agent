@@ -1,17 +1,24 @@
 """
 Agent de veille économique Chine — CFO étranger APAC
-=====================================================
-Sources : IMF, World Bank, OECD, Caixin, BBC Business, SCMP
+Version enrichie avec sources institutionnelles et médias chinois
+=======================================================
+Sources :
+- Internationales : IMF, World Bank, OECD, Caixin (EN), BBC, SCMP
+- Institutions chinoises : NBS, PBOC, MOFCOM, SCIO
+- Médias chinois : Xinhua, Caixin (CN), Yicai, People's Daily, China News Service
+
 Fréquence : lundi à vendredi 8h Shanghai (00:00 UTC)
+Variables : DEEPSEEK_API_KEY
 """
 
-import os, json, logging, hashlib
+import os, json, logging, hashlib, re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 import anthropic
-import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,39 +35,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-SOURCES = [
-    {
-        "nom": "IMF — Fonds monétaire international",
-        "url": "https://www.imf.org/en/News/rss?language=eng",
-        "tags": ["China", "Asia", "GDP", "growth", "inflation", "monetary", "fiscal"],
-    },
-    {
-        "nom": "World Bank — Banque mondiale",
-        "url": "https://blogs.worldbank.org/rss.xml",
-        "tags": ["China", "Asia", "economy", "growth", "trade", "development"],
-    },
-    {
-        "nom": "OECD — Organisation de coopération économique",
-        "url": "https://www.oecd.org/newsroom/news.rss",
-        "tags": ["China", "Asia", "GDP", "PMI", "inflation", "trade", "APAC"],
-    },
-    {
-        "nom": "Caixin — Presse économique chinoise",
-        "url": "https://www.caixinglobal.com/rss/all.xml",
-        "tags": ["China", "economy", "PMI", "GDP", "trade", "yuan", "PBOC", "property"],
-    },
-    {
-        "nom": "BBC Business — Actualités mondiales",
-        "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
-        "tags": ["China", "Asia", "economy", "trade", "yuan", "growth", "inflation"],
-    },
-    {
-        "nom": "South China Morning Post — Économie",
-        "url": "https://www.scmp.com/rss/5/feed",
-        "tags": ["China", "economy", "GDP", "PMI", "trade", "property", "consumption"],
-    },
-]
-
+# ---------------------------------------------------------------------------
+# Mots-clés élargis (anglais + translittérations)
+# ---------------------------------------------------------------------------
 KEYWORDS_ECO = [
     "China", "GDP", "growth", "PMI", "CPI", "PPI", "inflation", "deflation",
     "export", "import", "trade", "consumption", "retail", "industrial",
@@ -68,8 +45,129 @@ KEYWORDS_ECO = [
     "yuan", "RMB", "PBOC", "property", "real estate", "unemployment",
     "Caixin", "NBS", "APAC", "Asia", "supply chain", "manufacturing",
     "credit", "liquidity", "foreign investment", "FDI",
+    # termes chinois utiles (en pinyin ou anglais)
+    "renminbi", "zhongguo", "jingji", "fangdi chan", "dichan",
 ]
 
+
+# ---------------------------------------------------------------------------
+# Sources : définition avec URL de scraping ou RSS
+# ---------------------------------------------------------------------------
+
+# Sources RSS internationales (inchangées)
+RSS_SOURCES = [
+    {
+        "nom": "IMF — Fonds monétaire international",
+        "url": "https://www.imf.org/en/News/rss?language=eng",
+        "type": "rss"
+    },
+    {
+        "nom": "World Bank — Banque mondiale",
+        "url": "https://blogs.worldbank.org/rss.xml",
+        "type": "rss"
+    },
+    {
+        "nom": "OECD — Organisation de coopération économique",
+        "url": "https://www.oecd.org/newsroom/news.rss",
+        "type": "rss"
+    },
+    {
+        "nom": "Caixin English",
+        "url": "https://www.caixinglobal.com/rss/all.xml",
+        "type": "rss"
+    },
+    {
+        "nom": "BBC Business",
+        "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
+        "type": "rss"
+    },
+    {
+        "nom": "South China Morning Post",
+        "url": "https://www.scmp.com/rss/5/feed",
+        "type": "rss"
+    },
+]
+
+# Sources à scraper (HTML)
+SCRAPE_SOURCES = [
+    {
+        "nom": "NBS — Bureau national des statistiques (EN)",
+        "url": "https://www.stats.gov.cn/english/LatestReleases",
+        "type": "scrape",
+        "selector": "ul.list li a",  # sélecteur CSS approximatif
+        "href_attr": "href",
+        "base_url": "https://www.stats.gov.cn"
+    },
+    {
+        "nom": "PBOC — Banque populaire de Chine (EN)",
+        "url": "http://www.pbc.gov.cn/en/3688110/index.html",
+        "type": "scrape",
+        "selector": "div.newsList ul li a",
+        "href_attr": "href",
+        "base_url": "http://www.pbc.gov.cn"
+    },
+    {
+        "nom": "MOFCOM — Ministère du commerce (EN)",
+        "url": "http://english.mofcom.gov.cn/newsrelease/commonnews.shtml",
+        "type": "scrape",
+        "selector": "div.newsList ul li a",
+        "href_attr": "href",
+        "base_url": "http://english.mofcom.gov.cn"
+    },
+    {
+        "nom": "SCIO — Bureau d'info du Conseil des affaires de l'État (EN)",
+        "url": "http://www.scio.gov.cn/xwfbh/index.htm",
+        "type": "scrape",
+        "selector": "div.list li a",
+        "href_attr": "href",
+        "base_url": "http://www.scio.gov.cn"
+    },
+    {
+        "nom": "Xinhuanet — Finance (EN)",
+        "url": "http://www.xinhuanet.com/english/business/index.htm",
+        "type": "scrape",
+        "selector": "div.item-title a",
+        "href_attr": "href",
+        "base_url": "http://www.xinhuanet.com"
+    },
+    {
+        "nom": "Caixin — 财新网 (CN)",
+        "url": "https://economy.caixin.com/",
+        "type": "scrape",
+        "selector": "div.news-list li a",
+        "href_attr": "href",
+        "base_url": "https://economy.caixin.com"
+    },
+    {
+        "nom": "Yicai — 第一财经 (CN)",
+        "url": "https://www.yicai.com/news/",
+        "type": "scrape",
+        "selector": "div.news-list-item a",
+        "href_attr": "href",
+        "base_url": "https://www.yicai.com"
+    },
+    {
+        "nom": "People's Daily Online — Économie (EN)",
+        "url": "http://en.people.cn/economy/index.html",
+        "type": "scrape",
+        "selector": "div.cp p a",
+        "href_attr": "href",
+        "base_url": "http://en.people.cn"
+    },
+    {
+        "nom": "China News Service — Économie (CN)",
+        "url": "https://www.chinanews.com.cn/finance/",
+        "type": "scrape",
+        "selector": "div.news-list a",
+        "href_attr": "href",
+        "base_url": "https://www.chinanews.com.cn"
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Fonctions utilitaires
+# ---------------------------------------------------------------------------
 
 def charger_vus():
     if SEEN_FILE.exists():
@@ -83,19 +181,14 @@ def sauvegarder_vus(vus):
 
 
 def fetch_rss(source):
+    """Récupère et parse un flux RSS."""
     articles = []
     try:
-        resp = requests.get(
-            source["url"], timeout=15,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; CFO-EcoAgent/1.0)",
-                "Accept": "application/rss+xml, application/xml, text/xml",
-            }
-        )
+        resp = requests.get(source["url"], timeout=15,
+                            headers={"User-Agent": "CFO-EcoAgent/1.0"})
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
-        items = (root.findall(".//item") or
-                 root.findall(".//{http://www.w3.org/2005/Atom}entry"))
+        items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
 
         for item in items[:20]:
             titre = (
@@ -118,15 +211,66 @@ def fetch_rss(source):
             if titre:
                 articles.append({
                     "source": source["nom"],
-                    "titre":  titre,
-                    "lien":   lien,
-                    "desc":   desc[:600],
-                    "date":   date_str,
-                    "id":     hashlib.md5((titre + lien).encode()).hexdigest(),
+                    "titre": titre,
+                    "lien": lien,
+                    "desc": desc[:600],
+                    "date": date_str,
+                    "id": hashlib.md5((titre + lien).encode()).hexdigest(),
                 })
     except Exception as e:
-        log.warning(f"Erreur fetch {source['nom']} : {e}")
+        log.warning(f"Erreur fetch RSS {source['nom']} : {e}")
     return articles
+
+
+def scrape_source(source):
+    """Récupère les articles en scraping une page HTML."""
+    articles = []
+    try:
+        resp = requests.get(source["url"], timeout=15,
+                            headers={"User-Agent": "CFO-EcoAgent/1.0"})
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.content, "html.parser")
+        links = soup.select(source["selector"])
+        for link in links[:20]:   # max 20 articles par source
+            titre = link.get_text(strip=True)
+            if not titre:
+                continue
+            href = link.get(source["href_attr"])
+            if not href:
+                continue
+            # Construire URL absolue
+            if href.startswith("http"):
+                lien = href
+            else:
+                lien = urljoin(source["base_url"], href)
+            # On n'a pas de description ni date fiable, on met des valeurs par défaut
+            articles.append({
+                "source": source["nom"],
+                "titre": titre,
+                "lien": lien,
+                "desc": "",   # pas de description dispo facilement
+                "date": "",
+                "id": hashlib.md5((titre + lien).encode()).hexdigest(),
+            })
+    except Exception as e:
+        log.warning(f"Erreur scrape {source['nom']} : {e}")
+    return articles
+
+
+def collecter_tous_articles():
+    """Rassemble tous les articles (RSS + scraping)."""
+    tous = []
+    # RSS
+    for src in RSS_SOURCES:
+        articles = fetch_rss(src)
+        log.info(f"{src['nom']} : {len(articles)} articles RSS")
+        tous.extend(articles)
+    # Scraping
+    for src in SCRAPE_SOURCES:
+        articles = scrape_source(src)
+        log.info(f"{src['nom']} : {len(articles)} articles scrapés")
+        tous.extend(articles)
+    return tous
 
 
 def filtrer_pertinents(articles, vus):
@@ -139,6 +283,10 @@ def filtrer_pertinents(articles, vus):
             nouveaux.append(a)
     return nouveaux
 
+
+# ---------------------------------------------------------------------------
+# Analyse par DeepSeek (identique à avant)
+# ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """Tu es un économiste senior spécialisé en Chine et en zone APAC,
 conseiller d'un CFO de multinationale étrangère basé à Shanghai.
@@ -155,28 +303,35 @@ Ton analyse est en français, professionnelle, orientée décision CFO.
 Niveau de signal : FORT / MODÉRÉ / FAIBLE
 """
 
-def analyser_avec_claude(articles):
+def analyser_avec_deepseek(articles):
     if not articles:
         return "Aucun signal économique significatif détecté aujourd'hui."
 
-    client   = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    date_str = datetime.now().strftime("%d %B %Y")
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise ValueError("Variable DEEPSEEK_API_KEY non définie")
 
+    client = anthropic.Anthropic(
+        base_url="https://api.deepseek.com/anthropic",
+        api_key=api_key
+    )
+
+    date_str = datetime.now().strftime("%d %B %Y")
     articles_txt = ""
     for i, a in enumerate(articles, 1):
         articles_txt += (
             f"\n[{i}] Source : {a['source']}\n"
             f"    Titre : {a['titre']}\n"
-            f"    Date  : {a['date']}\n"
             f"    Lien  : {a['lien']}\n"
-            f"    Résumé: {a['desc']}\n"
         )
+        if a['desc']:
+            articles_txt += f"    Résumé: {a['desc']}\n"
 
     prompt = (
-        "Veille économique Chine — " + date_str + "\n"
-        "Nombre d'articles : " + str(len(articles)) + "\n\n"
-        + articles_txt +
-        "\nPour chaque signal important :\n"
+        f"Veille économique Chine — {date_str}\n"
+        f"Nombre d'articles : {len(articles)}\n\n"
+        f"{articles_txt}\n\n"
+        "Pour chaque signal important :\n"
         "1. SIGNAL : FORT / MODÉRÉ / FAIBLE\n"
         "2. INDICATEUR : quel indicateur macro ?\n"
         "3. LECTURE : que dit ce signal sur l'économie chinoise ?\n"
@@ -188,9 +343,9 @@ def analyser_avec_claude(articles):
         "- 3 POINTS D'ATTENTION pour le CFO cette semaine"
     )
 
-    log.info(f"Envoi de {len(articles)} articles à Claude...")
+    log.info(f"Envoi de {len(articles)} articles à DeepSeek...")
     msg = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="deepseek-v4-pro",
         max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
@@ -202,24 +357,25 @@ def generer_rapport(articles, analyse):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lignes = [
         "=" * 62,
-        "  VEILLE ECONOMIQUE CHINE — " + now,
+        f"  VEILLE ECONOMIQUE CHINE — {now}",
         "  Pour : CFO étranger / Couverture APAC",
+        "  Modèle IA : DeepSeek",
         "=" * 62,
         "",
-        "  " + str(len(articles)) + " signal(s) économique(s) détecté(s)",
+        f"  {len(articles)} signal(s) économique(s) détecté(s)",
         "",
         "  SOURCES SURVEILLÉES :",
     ]
-    for s in SOURCES:
-        lignes.append("    - " + s["nom"])
+    for s in RSS_SOURCES + SCRAPE_SOURCES:
+        lignes.append(f"    - {s['nom']}")
 
     if articles:
         lignes += ["", "-" * 62, "  ARTICLES DU JOUR", "-" * 62]
         for i, a in enumerate(articles, 1):
-            lignes.append("\n  [" + str(i) + "] " + a["source"])
-            lignes.append("      " + a["titre"])
+            lignes.append(f"\n  [{i}] {a['source']}")
+            lignes.append(f"      {a['titre']}")
             if a["lien"]:
-                lignes.append("      " + a["lien"])
+                lignes.append(f"      {a['lien']}")
 
     lignes += [
         "", "-" * 62,
@@ -233,29 +389,22 @@ def generer_rapport(articles, analyse):
 def sauvegarder_rapport(rapport):
     dossier = Path("rapports")
     dossier.mkdir(exist_ok=True)
-    fichier = dossier / ("eco_chine_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
+    fichier = dossier / f"eco_chine_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
     with open(fichier, "w", encoding="utf-8") as f:
         f.write(rapport)
-    log.info("Rapport : " + str(fichier))
+    log.info(f"Rapport : {fichier}")
 
 
 def executer_agent():
-    log.info("Démarrage agent veille économique Chine...")
+    log.info("Démarrage agent veille économique Chine (enrichi sources chinoises)")
     try:
         vus = charger_vus()
-        tous_articles = []
-
-        for source in SOURCES:
-            articles = fetch_rss(source)
-            log.info(source["nom"] + " : " + str(len(articles)) + " articles récupérés")
-            tous_articles.extend(articles)
-
+        tous_articles = collecter_tous_articles()
         pertinents = filtrer_pertinents(tous_articles, vus)
-        log.info("Signaux pertinents : " + str(len(pertinents)))
+        log.info(f"Signaux pertinents et nouveaux : {len(pertinents)}")
 
-        analyse = analyser_avec_claude(pertinents)
+        analyse = analyser_avec_deepseek(pertinents)
         rapport = generer_rapport(pertinents, analyse)
-
         print(rapport)
         sauvegarder_rapport(rapport)
 
@@ -265,10 +414,8 @@ def executer_agent():
 
         log.info("Terminé.")
 
-    except anthropic.APIError as e:
-        log.error("Claude : " + str(e))
     except Exception as e:
-        log.exception("Erreur : " + str(e))
+        log.exception(f"Erreur : {e}")
 
 
 if __name__ == "__main__":
