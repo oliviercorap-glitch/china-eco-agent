@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
 Agent de veille économique Chine — CFO étranger APAC
 Version enrichie avec sources institutionnelles et médias chinois
@@ -8,27 +11,28 @@ Sources :
 - Médias chinois : Xinhua, Caixin (CN), Yicai, People's Daily, China News Service
 
 Fréquence : lundi à vendredi 8h Shanghai (00:00 UTC)
-Variables : DEEPSEEK_API_KEY
+Variables d'environnement : DEEPSEEK_API_KEY
 """
 
 import os
 import json
 import logging
 import hashlib
-import re
-import xml.etree.ElementTree as ET   # <-- AJOUTÉ (manquait)
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
-from openai import OpenAI          # <-- Utilisation du client OpenAI
+from openai import OpenAI
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
+# Charger les variables d'environnement depuis .env (si présent)
 load_dotenv()
 
-LOG_FILE  = Path("logs/agent_eco.log")
+# --- Configuration des logs ---
+LOG_FILE = Path("logs/agent_eco.log")
 SEEN_FILE = Path("seen_eco_articles.json")
 
 Path("logs").mkdir(exist_ok=True)
@@ -58,6 +62,7 @@ KEYWORDS_ECO = [
 # Sources : définition avec URL de scraping ou RSS
 # ---------------------------------------------------------------------------
 
+# Sources RSS internationales
 RSS_SOURCES = [
     {
         "nom": "IMF — Fonds monétaire international",
@@ -91,6 +96,7 @@ RSS_SOURCES = [
     },
 ]
 
+# Sources à scraper (HTML)
 SCRAPE_SOURCES = [
     {
         "nom": "NBS — Bureau national des statistiques (EN)",
@@ -172,36 +178,45 @@ SCRAPE_SOURCES = [
 # ---------------------------------------------------------------------------
 
 def charger_vus():
+    """Charge l'ensemble des IDs d'articles déjà traités."""
     if SEEN_FILE.exists():
-        with open(SEEN_FILE) as f:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
             return set(json.load(f))
     return set()
 
 def sauvegarder_vus(vus):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(vus), f)
+    """Sauvegarde les IDs d'articles traités."""
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(vus), f, indent=2)
 
 
 def fetch_rss(source):
-    """Récupère et parse un flux RSS."""
+    """Récupère et parse un flux RSS (supporte RSS 2.0 et Atom)."""
     articles = []
     try:
-        resp = requests.get(source["url"], timeout=15,
-                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(source["url"], timeout=15, headers=headers)
         resp.raise_for_status()
+
         root = ET.fromstring(resp.content)
-        # Gestion des namespaces possibles
+        # Gestion des namespaces Atom
         ns = {'atom': 'http://www.w3.org/2005/Atom'}
         items = root.findall(".//item")
         if not items:
             items = root.findall(".//atom:entry", ns)
 
         for item in items[:20]:
-            titre = item.findtext("title") or item.findtext("atom:title", namespaces=ns) or ""
-            titre = titre.strip()
+            # Titre
+            titre = item.findtext("title")
+            if titre is None:
+                titre = item.findtext("atom:title", namespaces=ns)
             if not titre:
                 continue
-            # Récupération du lien
+            titre = titre.strip()
+
+            # Lien
             lien = ""
             link_el = item.find("link")
             if link_el is not None:
@@ -211,12 +226,18 @@ def fetch_rss(source):
                 if link_el is not None:
                     lien = link_el.get("href") or ""
             lien = lien.strip()
+
             # Description
-            desc = item.findtext("description") or item.findtext("atom:summary", namespaces=ns) or ""
-            desc = desc.strip()
+            desc = item.findtext("description")
+            if desc is None:
+                desc = item.findtext("atom:summary", namespaces=ns)
+            desc = (desc or "").strip()
+
             # Date
-            date_str = item.findtext("pubDate") or item.findtext("atom:updated", namespaces=ns) or ""
-            date_str = date_str.strip()
+            date_str = item.findtext("pubDate")
+            if date_str is None:
+                date_str = item.findtext("atom:updated", namespaces=ns)
+            date_str = (date_str or "").strip()
 
             articles.append({
                 "source": source["nom"],
@@ -235,8 +256,10 @@ def scrape_source(source):
     """Récupère les articles en scraping une page HTML."""
     articles = []
     try:
-        resp = requests.get(source["url"], timeout=15,
-                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(source["url"], timeout=15, headers=headers)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
         links = soup.select(source["selector"])
@@ -279,6 +302,7 @@ def collecter_tous_articles():
 
 
 def filtrer_pertinents(articles, vus):
+    """Filtre les articles : nouveaux et contenant au moins un mot-clé."""
     nouveaux = []
     for a in articles:
         if a["id"] in vus:
@@ -290,7 +314,7 @@ def filtrer_pertinents(articles, vus):
 
 
 # ---------------------------------------------------------------------------
-# Analyse par DeepSeek (via API OpenAI)
+# Analyse par DeepSeek via l'API OpenAI
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """Tu es un économiste senior spécialisé en Chine et en zone APAC,
@@ -309,6 +333,7 @@ Niveau de signal : FORT / MODÉRÉ / FAIBLE
 """
 
 def analyser_avec_deepseek(articles):
+    """Envoie les articles à DeepSeek et retourne l'analyse."""
     if not articles:
         return "Aucun signal économique significatif détecté aujourd'hui."
 
@@ -317,7 +342,7 @@ def analyser_avec_deepseek(articles):
         log.error("Variable DEEPSEEK_API_KEY non définie")
         return "Erreur : clé API DeepSeek manquante. Analyse non disponible."
 
-    # Utilisation du client OpenAI avec l'URL de DeepSeek
+    # Client OpenAI pointant vers DeepSeek
     client = OpenAI(
         base_url="https://api.deepseek.com/v1",
         api_key=api_key,
@@ -353,7 +378,7 @@ def analyser_avec_deepseek(articles):
     log.info(f"Envoi de {len(articles)} articles à DeepSeek via OpenAI client...")
     try:
         response = client.chat.completions.create(
-            model="deepseek-chat",          # ou "deepseek-reasoner" selon votre besoin
+            model="deepseek-chat",          # ou "deepseek-reasoner" selon vos besoins
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
@@ -368,6 +393,7 @@ def analyser_avec_deepseek(articles):
 
 
 def generer_rapport(articles, analyse):
+    """Génère le rapport final."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lignes = [
         "=" * 62,
@@ -402,6 +428,7 @@ def generer_rapport(articles, analyse):
 
 
 def sauvegarder_rapport(rapport):
+    """Sauvegarde le rapport dans le dossier rapports/."""
     dossier = Path("rapports")
     dossier.mkdir(exist_ok=True)
     fichier = dossier / f"eco_chine_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
@@ -411,6 +438,7 @@ def sauvegarder_rapport(rapport):
 
 
 def executer_agent():
+    """Point d'entrée principal."""
     log.info("Démarrage agent veille économique Chine (enrichi sources chinoises)")
     try:
         vus = charger_vus()
@@ -423,14 +451,15 @@ def executer_agent():
         print(rapport)
         sauvegarder_rapport(rapport)
 
+        # Mise à jour du cache des articles vus
         for a in pertinents:
             vus.add(a["id"])
         sauvegarder_vus(vus)
 
         log.info("Terminé.")
-
     except Exception as e:
-        log.exception(f"Erreur : {e}")
+        log.exception(f"Erreur générale : {e}")
+        raise
 
 
 if __name__ == "__main__":
