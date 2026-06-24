@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
-from openai import OpenAI
+from openai import OpenAI          # <-- Utilisation du client OpenAI
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
