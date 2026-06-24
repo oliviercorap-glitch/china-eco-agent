@@ -24,7 +24,6 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
-from openai import OpenAI          # <-- Utilisation du client OpenAI
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -314,7 +313,7 @@ def filtrer_pertinents(articles, vus):
 
 
 # ---------------------------------------------------------------------------
-# Analyse par DeepSeek via l'API OpenAI
+# Analyse par DeepSeek via appel HTTP direct (API compatible OpenAI)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """Tu es un économiste senior spécialisé en Chine et en zone APAC,
@@ -333,7 +332,7 @@ Niveau de signal : FORT / MODÉRÉ / FAIBLE
 """
 
 def analyser_avec_deepseek(articles):
-    """Envoie les articles à DeepSeek et retourne l'analyse."""
+    """Envoie les articles à DeepSeek via l'API REST et retourne l'analyse."""
     if not articles:
         return "Aucun signal économique significatif détecté aujourd'hui."
 
@@ -341,12 +340,6 @@ def analyser_avec_deepseek(articles):
     if not api_key:
         log.error("Variable DEEPSEEK_API_KEY non définie")
         return "Erreur : clé API DeepSeek manquante. Analyse non disponible."
-
-    # Client OpenAI pointant vers DeepSeek
-    client = OpenAI(
-        base_url="https://api.deepseek.com/v1",
-        api_key=api_key,
-    )
 
     date_str = datetime.now().strftime("%d %B %Y")
     articles_txt = ""
@@ -375,18 +368,26 @@ def analyser_avec_deepseek(articles):
         "- 3 POINTS D'ATTENTION pour le CFO cette semaine"
     )
 
-    log.info(f"Envoi de {len(articles)} articles à DeepSeek via OpenAI client...")
+    log.info(f"Envoi de {len(articles)} articles à DeepSeek via API REST...")
     try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",          # ou "deepseek-reasoner" selon vos besoins
-            messages=[
+        url = "https://api.deepseek.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": "deepseek-chat",  # ou "deepseek-reasoner"
+            "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
-            max_tokens=4096,
-        )
-        return response.choices[0].message.content
+            "temperature": 0.3,
+            "max_tokens": 4096
+        }
+        resp = requests.post(url, headers=headers, json=data, timeout=60)
+        resp.raise_for_status()
+        result = resp.json()
+        return result["choices"][0]["message"]["content"]
     except Exception as e:
         log.exception(f"Erreur lors de l'appel à DeepSeek : {e}")
         return f"Erreur d'analyse DeepSeek : {e}"
