@@ -11,13 +11,18 @@ Fréquence : lundi à vendredi 8h Shanghai (00:00 UTC)
 Variables : DEEPSEEK_API_KEY
 """
 
-import os, json, logging, hashlib, re
+import os
+import json
+import logging
+import hashlib
+import re
+import xml.etree.ElementTree as ET   # <-- AJOUTÉ (manquait)
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
-import anthropic
+from openai import OpenAI          # <-- Utilisation du client OpenAI
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -45,7 +50,6 @@ KEYWORDS_ECO = [
     "yuan", "RMB", "PBOC", "property", "real estate", "unemployment",
     "Caixin", "NBS", "APAC", "Asia", "supply chain", "manufacturing",
     "credit", "liquidity", "foreign investment", "FDI",
-    # termes chinois utiles (en pinyin ou anglais)
     "renminbi", "zhongguo", "jingji", "fangdi chan", "dichan",
 ]
 
@@ -54,7 +58,6 @@ KEYWORDS_ECO = [
 # Sources : définition avec URL de scraping ou RSS
 # ---------------------------------------------------------------------------
 
-# Sources RSS internationales (inchangées)
 RSS_SOURCES = [
     {
         "nom": "IMF — Fonds monétaire international",
@@ -88,13 +91,12 @@ RSS_SOURCES = [
     },
 ]
 
-# Sources à scraper (HTML)
 SCRAPE_SOURCES = [
     {
         "nom": "NBS — Bureau national des statistiques (EN)",
         "url": "https://www.stats.gov.cn/english/LatestReleases",
         "type": "scrape",
-        "selector": "ul.list li a",  # sélecteur CSS approximatif
+        "selector": "ul.list li a",
         "href_attr": "href",
         "base_url": "https://www.stats.gov.cn"
     },
@@ -185,38 +187,45 @@ def fetch_rss(source):
     articles = []
     try:
         resp = requests.get(source["url"], timeout=15,
-                            headers={"User-Agent": "CFO-EcoAgent/1.0"})
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
-        items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
+        # Gestion des namespaces possibles
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
+        items = root.findall(".//item")
+        if not items:
+            items = root.findall(".//atom:entry", ns)
 
         for item in items[:20]:
-            titre = (
-                getattr(item.find("title"), "text", "") or
-                getattr(item.find("{http://www.w3.org/2005/Atom}title"), "text", "") or ""
-            ).strip()
-            lien = (
-                getattr(item.find("link"), "text", "") or
-                getattr(item.find("{http://www.w3.org/2005/Atom}link"), "attrib", {}).get("href", "") or ""
-            ).strip()
-            desc = (
-                getattr(item.find("description"), "text", "") or
-                getattr(item.find("{http://www.w3.org/2005/Atom}summary"), "text", "") or ""
-            ).strip()
-            date_str = (
-                getattr(item.find("pubDate"), "text", "") or
-                getattr(item.find("{http://www.w3.org/2005/Atom}updated"), "text", "") or ""
-            ).strip()
+            titre = item.findtext("title") or item.findtext("atom:title", namespaces=ns) or ""
+            titre = titre.strip()
+            if not titre:
+                continue
+            # Récupération du lien
+            lien = ""
+            link_el = item.find("link")
+            if link_el is not None:
+                lien = link_el.text or link_el.get("href") or ""
+            if not lien:
+                link_el = item.find("atom:link", ns)
+                if link_el is not None:
+                    lien = link_el.get("href") or ""
+            lien = lien.strip()
+            # Description
+            desc = item.findtext("description") or item.findtext("atom:summary", namespaces=ns) or ""
+            desc = desc.strip()
+            # Date
+            date_str = item.findtext("pubDate") or item.findtext("atom:updated", namespaces=ns) or ""
+            date_str = date_str.strip()
 
-            if titre:
-                articles.append({
-                    "source": source["nom"],
-                    "titre": titre,
-                    "lien": lien,
-                    "desc": desc[:600],
-                    "date": date_str,
-                    "id": hashlib.md5((titre + lien).encode()).hexdigest(),
-                })
+            articles.append({
+                "source": source["nom"],
+                "titre": titre,
+                "lien": lien,
+                "desc": desc[:600],
+                "date": date_str,
+                "id": hashlib.md5((titre + lien).encode()).hexdigest(),
+            })
     except Exception as e:
         log.warning(f"Erreur fetch RSS {source['nom']} : {e}")
     return articles
@@ -227,28 +236,26 @@ def scrape_source(source):
     articles = []
     try:
         resp = requests.get(source["url"], timeout=15,
-                            headers={"User-Agent": "CFO-EcoAgent/1.0"})
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
         links = soup.select(source["selector"])
-        for link in links[:20]:   # max 20 articles par source
+        for link in links[:20]:
             titre = link.get_text(strip=True)
             if not titre:
                 continue
             href = link.get(source["href_attr"])
             if not href:
                 continue
-            # Construire URL absolue
             if href.startswith("http"):
                 lien = href
             else:
                 lien = urljoin(source["base_url"], href)
-            # On n'a pas de description ni date fiable, on met des valeurs par défaut
             articles.append({
                 "source": source["nom"],
                 "titre": titre,
                 "lien": lien,
-                "desc": "",   # pas de description dispo facilement
+                "desc": "",
                 "date": "",
                 "id": hashlib.md5((titre + lien).encode()).hexdigest(),
             })
@@ -260,12 +267,10 @@ def scrape_source(source):
 def collecter_tous_articles():
     """Rassemble tous les articles (RSS + scraping)."""
     tous = []
-    # RSS
     for src in RSS_SOURCES:
         articles = fetch_rss(src)
         log.info(f"{src['nom']} : {len(articles)} articles RSS")
         tous.extend(articles)
-    # Scraping
     for src in SCRAPE_SOURCES:
         articles = scrape_source(src)
         log.info(f"{src['nom']} : {len(articles)} articles scrapés")
@@ -285,7 +290,7 @@ def filtrer_pertinents(articles, vus):
 
 
 # ---------------------------------------------------------------------------
-# Analyse par DeepSeek (identique à avant)
+# Analyse par DeepSeek (via API OpenAI)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """Tu es un économiste senior spécialisé en Chine et en zone APAC,
@@ -309,11 +314,13 @@ def analyser_avec_deepseek(articles):
 
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
-        raise ValueError("Variable DEEPSEEK_API_KEY non définie")
+        log.error("Variable DEEPSEEK_API_KEY non définie")
+        return "Erreur : clé API DeepSeek manquante. Analyse non disponible."
 
-    client = anthropic.Anthropic(
-        base_url="https://api.deepseek.com/anthropic",
-        api_key=api_key
+    # Utilisation du client OpenAI avec l'URL de DeepSeek
+    client = OpenAI(
+        base_url="https://api.deepseek.com/v1",
+        api_key=api_key,
     )
 
     date_str = datetime.now().strftime("%d %B %Y")
@@ -343,14 +350,21 @@ def analyser_avec_deepseek(articles):
         "- 3 POINTS D'ATTENTION pour le CFO cette semaine"
     )
 
-    log.info(f"Envoi de {len(articles)} articles à DeepSeek...")
-    msg = client.messages.create(
-        model="deepseek-v4-pro",
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return msg.content[0].text
+    log.info(f"Envoi de {len(articles)} articles à DeepSeek via OpenAI client...")
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat",          # ou "deepseek-reasoner" selon votre besoin
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=4096,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        log.exception(f"Erreur lors de l'appel à DeepSeek : {e}")
+        return f"Erreur d'analyse DeepSeek : {e}"
 
 
 def generer_rapport(articles, analyse):
@@ -385,6 +399,7 @@ def generer_rapport(articles, analyse):
         "", "=" * 62,
     ]
     return "\n".join(lignes)
+
 
 def sauvegarder_rapport(rapport):
     dossier = Path("rapports")
