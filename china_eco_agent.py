@@ -12,7 +12,7 @@ Sources:
 
 Frequency: Mon-Fri 8am Shanghai (00:00 UTC)
 Env: DEEPSEEK_API_KEY
-Output: HTML report in English (styled, filtered articles)
+Output: HTML report in English (styled, filtered articles) – saved as index.html + timestamped
 """
 
 import os
@@ -74,12 +74,13 @@ KEYWORDS_ECO = [
 def article_relevant(article):
     """Retourne True si l'article a au moins 2 mots-clés (anglais ou chinois)."""
     texte = (article["titre"] + " " + article["desc"]).lower()
-    # Compter les occurrences (chaque mot-clé compte une fois)
     count = 0
     for kw in KEYWORDS_ECO:
         if kw.lower() in texte:
             count += 1
-    return count >= 2
+            if count >= 2:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +96,7 @@ RSS_SOURCES = [
 ]
 
 SCRAPE_SOURCES = [
-    # English sources (existing)
+    # English sources
     {
         "nom": "NBS (EN)",
         "url": "https://www.stats.gov.cn/english/LatestReleases",
@@ -168,7 +169,7 @@ SCRAPE_SOURCES = [
         "href_attr": "href",
         "base_url": "https://www.chinanews.com.cn"
     },
-    # NEW: Chinese native sources
+    # Chinese native sources (sélecteurs à ajuster)
     {
         "nom": "人民网 经济 (People's Daily CN)",
         "url": "http://finance.people.com.cn/",
@@ -284,10 +285,13 @@ def fetch_rss(source):
 def scrape_source(source):
     articles = []
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://www.baidu.com/",
+        }
         resp = requests.get(source["url"], timeout=15, headers=headers)
         resp.raise_for_status()
-        # Forcer l'encodage sur UTF-8 si le serveur ne le précise pas
         if resp.encoding is None:
             resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.content, "html.parser")
@@ -709,11 +713,21 @@ def generer_rapport_html(articles, analyse):
 def sauvegarder_rapport_html(html):
     dossier = Path("rapports")
     dossier.mkdir(exist_ok=True)
-    fichier = dossier / f"eco_chine_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
-    with open(fichier, "w", encoding="utf-8") as f:
+    
+    # Fichier horodaté pour historique
+    horodate = datetime.now().strftime('%Y%m%d_%H%M')
+    fichier_his = dossier / f"eco_chine_{horodate}.html"
+    with open(fichier_his, "w", encoding="utf-8") as f:
         f.write(html)
-    log.info(f"HTML report saved: {fichier}")
-    return fichier
+    log.info(f"HTML report saved (timestamped): {fichier_his}")
+    
+    # Fichier index.html pour le dernier rapport (écrasé à chaque fois)
+    fichier_index = dossier / "index.html"
+    with open(fichier_index, "w", encoding="utf-8") as f:
+        f.write(html)
+    log.info(f"HTML report saved (index): {fichier_index}")
+    
+    return fichier_index
 
 
 # ---------------------------------------------------------------------------
