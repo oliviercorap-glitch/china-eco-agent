@@ -3,20 +3,21 @@ name: China Economic Intelligence
 on:
   schedule:
     - cron: '0 0 * * 1-5'          # du lundi au vendredi à 00:00 UTC (8h Shanghai)
-  workflow_dispatch:               # permet un déclenchement manuel
+  workflow_dispatch:
 
 permissions:
-  contents: write                  # nécessaire pour pousser sur la branche reports
+  contents: write
 
 jobs:
   generate-report:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (main branch)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0            # pour avoir tout l'historique et pouvoir créer une branche
+          fetch-depth: 0
+          ref: main
 
       - name: Restore seen articles cache
         uses: actions/cache@v3
@@ -50,26 +51,29 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # S'assurer que la branche 'reports' existe (la créer si nécessaire)
+          # Si la branche 'reports' existe déjà, on la supprime (on repart de zéro)
           if git ls-remote --heads origin reports | grep -q reports; then
-            git checkout reports
-          else
-            git checkout --orphan reports
-            git rm -rf . || true
-            git commit --allow-empty -m "Initial reports branch"
-            git push origin reports
-            git checkout reports
+            git push origin --delete reports
           fi
 
-          # Copier les rapports depuis le dossier 'rapports' à la racine (pour un accès direct)
+          # Créer une nouvelle branche orpheline 'reports'
+          git checkout --orphan reports
+          git rm -rf . || true
+          git commit --allow-empty -m "Initial reports branch"
+          git push origin reports
+
+          # Revenir sur la branche pour y copier les rapports
+          git checkout reports
+
+          # Copier le rapport depuis le dossier 'rapports' (qui existe encore localement)
           mkdir -p reports
           cp rapports/*.html reports/ 2>/dev/null || true
 
-          # Ajouter et commit (seulement s'il y a des changements)
+          # Ajouter et commit
           git add reports/
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Update economic report $(date +'%Y-%m-%d %H:%M')"
+            git commit -m "Update report $(date +'%Y-%m-%d %H:%M')"
             git push origin reports
           fi
