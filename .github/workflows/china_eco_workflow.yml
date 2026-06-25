@@ -1,15 +1,22 @@
-name: Veille économique Chine
+name: China Economic Intelligence
 
 on:
   schedule:
-    - cron: '0 0 * * 1-5'
-  workflow_dispatch:
+    - cron: '0 0 * * 1-5'          # du lundi au vendredi à 00:00 UTC (8h Shanghai)
+  workflow_dispatch:               # permet un déclenchement manuel
+
+permissions:
+  contents: write                  # nécessaire pour pousser sur la branche reports
 
 jobs:
-  veille-economique:
+  generate-report:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # pour avoir tout l'historique et pouvoir créer une branche
 
       - name: Restore seen articles cache
         uses: actions/cache@v3
@@ -18,7 +25,7 @@ jobs:
           key: seen-eco-${{ github.run_id }}
           restore-keys: seen-eco-
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -26,7 +33,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml python-dotenv
 
-      - name: Run agent
+      - name: Run China Eco Agent
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: python china_eco_agent.py
@@ -37,9 +44,32 @@ jobs:
           path: seen_eco_articles.json
           key: seen-eco-${{ github.run_id }}
 
-      - name: Upload HTML report
-        uses: actions/upload-artifact@v4
-        with:
-          name: eco-chine-report
-          path: rapports/*.html
-          retention-days: 90
+      - name: Commit and push HTML report to 'reports' branch
+        run: |
+          # Configurer git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # S'assurer que la branche 'reports' existe (la créer si nécessaire)
+          if git ls-remote --heads origin reports | grep -q reports; then
+            git checkout reports
+          else
+            git checkout --orphan reports
+            git rm -rf . || true
+            git commit --allow-empty -m "Initial reports branch"
+            git push origin reports
+            git checkout reports
+          fi
+
+          # Copier les rapports depuis le dossier 'rapports' à la racine (pour un accès direct)
+          mkdir -p reports
+          cp rapports/*.html reports/ 2>/dev/null || true
+
+          # Ajouter et commit (seulement s'il y a des changements)
+          git add reports/
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update economic report $(date +'%Y-%m-%d %H:%M')"
+            git push origin reports
+          fi
