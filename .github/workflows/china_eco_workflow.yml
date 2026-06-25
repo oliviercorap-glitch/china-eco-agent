@@ -2,15 +2,14 @@ name: Veille économique Chine
 
 on:
   schedule:
-    - cron: '0 0 * * 1-5'  # du lundi au vendredi à 00:00 UTC
+    - cron: '0 0 * * 1-5'
   workflow_dispatch:
 
 jobs:
   veille-economique:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Restore seen articles cache
         uses: actions/cache@v3
@@ -25,8 +24,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4 lxml python-dotenv
+        run: pip install requests beautifulsoup4 lxml python-dotenv
 
       - name: Run agent
         env:
@@ -39,9 +37,9 @@ jobs:
           path: seen_eco_articles.json
           key: seen-eco-${{ github.run_id }}
 
-      - name: Upload report
+      - name: Upload HTML report
         uses: actions/upload-artifact@v4
         with:
-          name: eco-chine
-          path: rapports/
+          name: eco-chine-report
+          path: rapports/*.html
           retention-days: 90
