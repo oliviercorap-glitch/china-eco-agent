@@ -5,19 +5,21 @@
 China Economic Intelligence Agent — for APAC CFO
 ================================================
 Sources:
-- International: IMF, World Bank, OECD, Caixin (EN), BBC, SCMP
-- Chinese institutions: NBS, PBOC, MOFCOM, SCIO
-- Chinese media: Xinhua, Caixin (CN), Yicai, People's Daily, China News Service
+- International (EN): IMF, World Bank, OECD, Caixin (EN), BBC, SCMP
+- Chinese institutions (EN): NBS, PBOC, MOFCOM, SCIO
+- Chinese media (EN): Xinhua, Caixin (CN), Yicai, People's Daily, China News Service
+- Chinese media (CN native): People's Daily CN, Xinhua CN, Sina Finance, Sohu Finance, CE.cn, East Money
 
 Frequency: Mon-Fri 8am Shanghai (00:00 UTC)
 Env: DEEPSEEK_API_KEY
-Output: HTML report in English
+Output: HTML report in English (styled, filtered articles)
 """
 
 import os
 import json
 import logging
 import hashlib
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +36,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 LOG_FILE = Path("logs/agent_eco.log")
 SEEN_FILE = Path("seen_eco_articles.json")
-DEBUG_MODE = True   # Mettre à False pour réduire les logs
+DEBUG_MODE = False
 
 Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
@@ -46,9 +48,10 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Mots‑clés (en anglais) – à ajuster selon les titres réellement récupérés
+# Mots‑clés bilingues (anglais + chinois)
 # ---------------------------------------------------------------------------
 KEYWORDS_ECO = [
+    # English
     "China", "Chinese", "GDP", "growth", "PMI", "CPI", "PPI",
     "inflation", "deflation", "export", "import", "trade",
     "consumption", "retail", "industrial", "stimulus", "fiscal",
@@ -56,14 +59,31 @@ KEYWORDS_ECO = [
     "PBOC", "property", "real estate", "unemployment", "Caixin",
     "NBS", "APAC", "Asia", "supply chain", "manufacturing",
     "credit", "liquidity", "foreign investment", "FDI",
-    "renminbi", "zhongguo", "jingji", "fangdi chan", "dichan",
-    # Ajoutez ici des termes plus généraux si besoin
-    "Beijing", "Shanghai", "economy", "policy", "rate", "market"
+    "renminbi", "economy", "policy", "rate", "market",
+    "Beijing", "Shanghai", "tariff", "trade war", "debt", "bond",
+    "stock", "yield", "infrastructure", "consumer", "spending",
+    # Chinese (simplified)
+    "经济", "中国", "增长", "通胀", "通货", "出口", "进口",
+    "贸易", "消费", "零售", "工业", "财政", "货币", "利率",
+    "准备金", "人民币", "央行", "房地产", "失业", "制造业",
+    "供应链", "信贷", "流动性", "外商投资", "政策", "市场",
+    "北京", "上海", "关税", "债务", "债券", "股票", "基础设施",
+    "消费支出", "GDP", "PMI", "CPI", "PPI"
 ]
+
+def article_relevant(article):
+    """Retourne True si l'article a au moins 2 mots-clés (anglais ou chinois)."""
+    texte = (article["titre"] + " " + article["desc"]).lower()
+    # Compter les occurrences (chaque mot-clé compte une fois)
+    count = 0
+    for kw in KEYWORDS_ECO:
+        if kw.lower() in texte:
+            count += 1
+    return count >= 2
 
 
 # ---------------------------------------------------------------------------
-# Sources (flux RSS + scraping)
+# Sources (RSS + scraping) – version enrichie avec sources CN natives
 # ---------------------------------------------------------------------------
 RSS_SOURCES = [
     {"nom": "IMF", "url": "https://www.imf.org/en/News/rss?language=eng", "type": "rss"},
@@ -75,6 +95,7 @@ RSS_SOURCES = [
 ]
 
 SCRAPE_SOURCES = [
+    # English sources (existing)
     {
         "nom": "NBS (EN)",
         "url": "https://www.stats.gov.cn/english/LatestReleases",
@@ -147,11 +168,60 @@ SCRAPE_SOURCES = [
         "href_attr": "href",
         "base_url": "https://www.chinanews.com.cn"
     },
+    # NEW: Chinese native sources
+    {
+        "nom": "人民网 经济 (People's Daily CN)",
+        "url": "http://finance.people.com.cn/",
+        "type": "scrape",
+        "selector": "div.cj_list a",
+        "href_attr": "href",
+        "base_url": "http://finance.people.com.cn/"
+    },
+    {
+        "nom": "新华网 财经 (Xinhua CN)",
+        "url": "http://www.xinhuanet.com/fortune/index.htm",
+        "type": "scrape",
+        "selector": "div.item-title a",
+        "href_attr": "href",
+        "base_url": "http://www.xinhuanet.com"
+    },
+    {
+        "nom": "新浪财经 (Sina Finance)",
+        "url": "https://finance.sina.com.cn/",
+        "type": "scrape",
+        "selector": "div.news-item a",
+        "href_attr": "href",
+        "base_url": "https://finance.sina.com.cn"
+    },
+    {
+        "nom": "搜狐财经 (Sohu Finance)",
+        "url": "https://business.sohu.com/",
+        "type": "scrape",
+        "selector": "div.news-list a",
+        "href_attr": "href",
+        "base_url": "https://business.sohu.com"
+    },
+    {
+        "nom": "中国经济网 (CE.cn)",
+        "url": "http://www.ce.cn/",
+        "type": "scrape",
+        "selector": "div.news_list a",
+        "href_attr": "href",
+        "base_url": "http://www.ce.cn"
+    },
+    {
+        "nom": "东方财富 (East Money)",
+        "url": "https://www.eastmoney.com/",
+        "type": "scrape",
+        "selector": "div.news-item a",
+        "href_attr": "href",
+        "base_url": "https://www.eastmoney.com"
+    }
 ]
 
 
 # ---------------------------------------------------------------------------
-# Utilitaires : cache des articles déjà vus
+# Utilitaires
 # ---------------------------------------------------------------------------
 def charger_vus():
     if SEEN_FILE.exists():
@@ -209,7 +279,7 @@ def fetch_rss(source):
 
 
 # ---------------------------------------------------------------------------
-# Scraping HTML
+# Scraping HTML (supporte UTF-8)
 # ---------------------------------------------------------------------------
 def scrape_source(source):
     articles = []
@@ -217,6 +287,9 @@ def scrape_source(source):
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         resp = requests.get(source["url"], timeout=15, headers=headers)
         resp.raise_for_status()
+        # Forcer l'encodage sur UTF-8 si le serveur ne le précise pas
+        if resp.encoding is None:
+            resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.content, "html.parser")
         links = soup.select(source["selector"])
         for link in links[:20]:
@@ -240,9 +313,6 @@ def scrape_source(source):
     return articles
 
 
-# ---------------------------------------------------------------------------
-# Collecte et filtrage
-# ---------------------------------------------------------------------------
 def collecter_tous_articles():
     tous = []
     for src in RSS_SOURCES:
@@ -254,13 +324,11 @@ def collecter_tous_articles():
         log.info(f"{src['nom']}: {len(articles)} scraped articles")
         tous.extend(articles)
 
-    # DEBUG : afficher les 10 premiers titres pour voir leur contenu
     if DEBUG_MODE and tous:
-        log.debug("===== Échantillon d'articles récupérés =====")
+        log.debug("===== Sample articles =====")
         for i, a in enumerate(tous[:10], 1):
-            log.debug(f"{i}. {a['source']} - {a['titre']}")
-        log.debug("============================================")
-
+            log.debug(f"{i}. {a['source']} - {a['titre'][:50]}")
+        log.debug("===========================")
     return tous
 
 
@@ -269,15 +337,14 @@ def filtrer_pertinents(articles, vus):
     for a in articles:
         if a["id"] in vus:
             continue
-        texte = (a["titre"] + " " + a["desc"]).lower()
-        if any(kw.lower() in texte for kw in KEYWORDS_ECO):
+        if article_relevant(a):
             nouveaux.append(a)
-            log.debug(f"Match: {a['titre']}")
+            log.debug(f"Relevant: {a['titre'][:50]}...")
     return nouveaux
 
 
 # ---------------------------------------------------------------------------
-# Analyse DeepSeek (API REST)
+# Analyse DeepSeek (REST API) – en anglais
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT_EN = """You are a senior economist specialized in China and the APAC region,
 advising a CFO of a multinational corporation based in Shanghai.
@@ -356,12 +423,81 @@ def analyser_avec_deepseek(articles):
 
 
 # ---------------------------------------------------------------------------
-# Génération du rapport HTML (en anglais)
+# HTML Report Generator – avec mise en forme
 # ---------------------------------------------------------------------------
+def format_analysis(analysis_text):
+    if not analysis_text:
+        return "<p>No analysis available.</p>"
+
+    lines = analysis_text.split('\n')
+    html_lines = []
+    in_list = False
+    in_section = False
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append("<br>")
+            continue
+
+        # Section titles (Signal, Macro Summary, etc.)
+        if re.match(r'^###?\s+Signal\s+\d+:', line, re.I) or re.match(r'^##?\s*Signal\s+\d+:', line, re.I):
+            if in_section:
+                html_lines.append("</div>")
+            html_lines.append(f'<div class="signal-section"><h3 class="signal-title">{line}</h3>')
+            in_section = True
+            continue
+
+        if re.match(r'^##?\s*(MACRO SUMMARY|APAC COMPARISON|3 KEY POINTS)', line, re.I):
+            if in_section:
+                html_lines.append("</div>")
+            html_lines.append(f'<div class="section-block"><h3 class="block-title">{line}</h3>')
+            in_section = True
+            continue
+
+        # Labels (INDICATOR, READING, CFO IMPACT, TO WATCH)
+        if re.match(r'^\*\*?([A-Z\s]+):\*\*?', line):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            line = re.sub(r'\*\*(.*?):\*\*', r'<strong>\1:</strong>', line)
+            html_lines.append(f'<p class="label">{line}</p>')
+            continue
+
+        # List items (- or *)
+        if line.startswith('- ') or line.startswith('* '):
+            if not in_list:
+                html_lines.append("<ul>")
+                in_list = True
+            content = line[2:] if line.startswith('- ') else line[1:]
+            content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', content)
+            html_lines.append(f'<li>{content}</li>')
+            continue
+
+        if in_list:
+            html_lines.append("</ul>")
+            in_list = False
+
+        line = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', line)
+        html_lines.append(f'<p class="normal">{line}</p>')
+
+    if in_section:
+        html_lines.append("</div>")
+    if in_list:
+        html_lines.append("</ul>")
+
+    return '\n'.join(html_lines)
+
+
 def generer_rapport_html(articles, analyse):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     date_str = datetime.now().strftime("%d %B %Y")
     sources_list = [s['nom'] for s in RSS_SOURCES + SCRAPE_SOURCES]
+
+    formatted_analysis = format_analysis(analyse)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -455,16 +591,44 @@ def generer_rapport_html(articles, analyse):
             font-size: 0.95rem;
             color: #334155;
         }}
-        .analysis {{
+        .analysis-box {{
             background: #f8fafc;
             padding: 25px 30px;
             border-radius: 12px;
             border: 1px solid #e2e8f0;
-            white-space: pre-wrap;
-            font-family: 'Segoe UI', Roboto, Arial, sans-serif;
-            font-size: 1rem;
-            line-height: 1.7;
             margin-top: 10px;
+        }}
+        .analysis-box .signal-section,
+        .analysis-box .section-block {{
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #e2e8f0;
+        }}
+        .analysis-box .signal-title,
+        .analysis-box .block-title {{
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #0f172a;
+            margin-bottom: 10px;
+        }}
+        .analysis-box .label {{
+            font-weight: 600;
+            color: #1e40af;
+            margin: 8px 0 4px 0;
+        }}
+        .analysis-box ul {{
+            margin: 8px 0 12px 20px;
+            padding-left: 0;
+            list-style-type: disc;
+        }}
+        .analysis-box ul li {{
+            margin-bottom: 4px;
+        }}
+        .analysis-box p {{
+            margin: 6px 0;
+        }}
+        .analysis-box .normal {{
+            margin: 4px 0;
         }}
         .footer {{
             margin-top: 40px;
@@ -515,7 +679,9 @@ def generer_rapport_html(articles, analyse):
 
     <div class="section">
         <div class="section-title">📊 Economic Analysis & CFO Brief</div>
-        <div class="analysis">{analyse}</div>
+        <div class="analysis-box">
+            {formatted_analysis}
+        </div>
     </div>
 
     <div class="section" style="margin-top: 20px;">
@@ -551,10 +717,10 @@ def sauvegarder_rapport_html(html):
 
 
 # ---------------------------------------------------------------------------
-# Fonction principale
+# Main
 # ---------------------------------------------------------------------------
 def executer_agent():
-    log.info("Starting China economic intelligence agent (English report)")
+    log.info("Starting China economic intelligence agent (English report, Chinese sources)")
     try:
         vus = charger_vus()
         tous_articles = collecter_tous_articles()
@@ -567,7 +733,6 @@ def executer_agent():
 
         print(f"Report generated: {fichier}")
 
-        # Mettre à jour le cache
         for a in pertinents:
             vus.add(a["id"])
         sauvegarder_vus(vus)
