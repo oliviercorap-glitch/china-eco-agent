@@ -29,13 +29,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Logging (French for internal tracking)
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 LOG_FILE = Path("logs/agent_eco.log")
 SEEN_FILE = Path("seen_eco_articles.json")
+DEBUG_MODE = True   # Mettre à False pour réduire les logs
 
 Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if DEBUG_MODE else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(), logging.FileHandler(LOG_FILE, encoding="utf-8")],
 )
@@ -43,23 +46,25 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Keywords (English)
+# Mots‑clés (en anglais) – à ajuster selon les titres réellement récupérés
 # ---------------------------------------------------------------------------
 KEYWORDS_ECO = [
-    "China", "GDP", "growth", "PMI", "CPI", "PPI", "inflation", "deflation",
-    "export", "import", "trade", "consumption", "retail", "industrial",
-    "stimulus", "fiscal", "monetary", "interest rate", "reserve",
-    "yuan", "RMB", "PBOC", "property", "real estate", "unemployment",
-    "Caixin", "NBS", "APAC", "Asia", "supply chain", "manufacturing",
+    "China", "Chinese", "GDP", "growth", "PMI", "CPI", "PPI",
+    "inflation", "deflation", "export", "import", "trade",
+    "consumption", "retail", "industrial", "stimulus", "fiscal",
+    "monetary", "interest rate", "reserve", "yuan", "RMB",
+    "PBOC", "property", "real estate", "unemployment", "Caixin",
+    "NBS", "APAC", "Asia", "supply chain", "manufacturing",
     "credit", "liquidity", "foreign investment", "FDI",
     "renminbi", "zhongguo", "jingji", "fangdi chan", "dichan",
+    # Ajoutez ici des termes plus généraux si besoin
+    "Beijing", "Shanghai", "economy", "policy", "rate", "market"
 ]
 
 
 # ---------------------------------------------------------------------------
-# Sources
+# Sources (flux RSS + scraping)
 # ---------------------------------------------------------------------------
-
 RSS_SOURCES = [
     {"nom": "IMF", "url": "https://www.imf.org/en/News/rss?language=eng", "type": "rss"},
     {"nom": "World Bank", "url": "https://blogs.worldbank.org/rss.xml", "type": "rss"},
@@ -146,9 +151,8 @@ SCRAPE_SOURCES = [
 
 
 # ---------------------------------------------------------------------------
-# Utilities
+# Utilitaires : cache des articles déjà vus
 # ---------------------------------------------------------------------------
-
 def charger_vus():
     if SEEN_FILE.exists():
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
@@ -160,6 +164,9 @@ def sauvegarder_vus(vus):
         json.dump(list(vus), f, indent=2)
 
 
+# ---------------------------------------------------------------------------
+# Récupération RSS
+# ---------------------------------------------------------------------------
 def fetch_rss(source):
     articles = []
     try:
@@ -201,6 +208,9 @@ def fetch_rss(source):
     return articles
 
 
+# ---------------------------------------------------------------------------
+# Scraping HTML
+# ---------------------------------------------------------------------------
 def scrape_source(source):
     articles = []
     try:
@@ -230,6 +240,9 @@ def scrape_source(source):
     return articles
 
 
+# ---------------------------------------------------------------------------
+# Collecte et filtrage
+# ---------------------------------------------------------------------------
 def collecter_tous_articles():
     tous = []
     for src in RSS_SOURCES:
@@ -240,6 +253,14 @@ def collecter_tous_articles():
         articles = scrape_source(src)
         log.info(f"{src['nom']}: {len(articles)} scraped articles")
         tous.extend(articles)
+
+    # DEBUG : afficher les 10 premiers titres pour voir leur contenu
+    if DEBUG_MODE and tous:
+        log.debug("===== Échantillon d'articles récupérés =====")
+        for i, a in enumerate(tous[:10], 1):
+            log.debug(f"{i}. {a['source']} - {a['titre']}")
+        log.debug("============================================")
+
     return tous
 
 
@@ -251,13 +272,13 @@ def filtrer_pertinents(articles, vus):
         texte = (a["titre"] + " " + a["desc"]).lower()
         if any(kw.lower() in texte for kw in KEYWORDS_ECO):
             nouveaux.append(a)
+            log.debug(f"Match: {a['titre']}")
     return nouveaux
 
 
 # ---------------------------------------------------------------------------
-# DeepSeek analysis (via REST API) – English output
+# Analyse DeepSeek (API REST)
 # ---------------------------------------------------------------------------
-
 SYSTEM_PROMPT_EN = """You are a senior economist specialized in China and the APAC region,
 advising a CFO of a multinational corporation based in Shanghai.
 
@@ -335,15 +356,13 @@ def analyser_avec_deepseek(articles):
 
 
 # ---------------------------------------------------------------------------
-# HTML Report Generator (English)
+# Génération du rapport HTML (en anglais)
 # ---------------------------------------------------------------------------
-
 def generer_rapport_html(articles, analyse):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     date_str = datetime.now().strftime("%d %B %Y")
     sources_list = [s['nom'] for s in RSS_SOURCES + SCRAPE_SOURCES]
 
-    # Build HTML
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -532,9 +551,8 @@ def sauvegarder_rapport_html(html):
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Fonction principale
 # ---------------------------------------------------------------------------
-
 def executer_agent():
     log.info("Starting China economic intelligence agent (English report)")
     try:
@@ -547,10 +565,9 @@ def executer_agent():
         html = generer_rapport_html(pertinents, analyse)
         fichier = sauvegarder_rapport_html(html)
 
-        # Print path for GitHub Actions
         print(f"Report generated: {fichier}")
 
-        # Update seen articles
+        # Mettre à jour le cache
         for a in pertinents:
             vus.add(a["id"])
         sauvegarder_vus(vus)
