@@ -3,13 +3,14 @@ name: China Economic Intelligence
 on:
   schedule:
     - cron: '0 0 * * 1-5'          # du lundi au vendredi à 00:00 UTC (8h Shanghai)
-  workflow_dispatch:
+  workflow_dispatch:               # permet un déclenchement manuel
 
 permissions:
   contents: write
+  pages: write                     # nécessaire pour déployer sur gh-pages
 
 jobs:
-  generate-report:
+  generate-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
@@ -45,35 +46,13 @@ jobs:
           path: seen_eco_articles.json
           key: seen-eco-${{ github.run_id }}
 
-      - name: Commit and push HTML report to 'reports' branch
-        run: |
-          # Configurer git
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Si la branche 'reports' existe déjà, on la supprime (on repart de zéro)
-          if git ls-remote --heads origin reports | grep -q reports; then
-            git push origin --delete reports
-          fi
-
-          # Créer une nouvelle branche orpheline 'reports'
-          git checkout --orphan reports
-          git rm -rf . || true
-          git commit --allow-empty -m "Initial reports branch"
-          git push origin reports
-
-          # Revenir sur la branche pour y copier les rapports
-          git checkout reports
-
-          # Copier le rapport depuis le dossier 'rapports' (qui existe encore localement)
-          mkdir -p reports
-          cp rapports/*.html reports/ 2>/dev/null || true
-
-          # Ajouter et commit
-          git add reports/
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Update report $(date +'%Y-%m-%d %H:%M')"
-            git push origin reports
-          fi
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./rapports
+          publish_branch: gh-pages
+          keep_files: false          # écrase tout pour ne garder que le dernier index.html
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+          commit_message: 'Deploy report ${{ github.run_id }}'
